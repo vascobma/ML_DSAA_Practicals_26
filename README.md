@@ -22,6 +22,8 @@ corresponding practical class.
 | Week 7 | Bayesian regression | [Open](notebooks/week_07/week_07_bayesian_regression.ipynb) | Not yet released |
 | Week 8 | Similarity and KNN | [Open](notebooks/week_08/week_08_similarity_knn.ipynb) | Not yet released |
 | Week 8 | KNN for a numeric target | [Open](notebooks/week_08/week_08_knn_regression.ipynb) | Not yet released |
+| Week 9 | Decision trees | [Open](notebooks/week_09/week_09_decision_trees.ipynb) | Not yet released |
+| Week 9 | Decision trees for a numeric target | [Open](notebooks/week_09/week_09_regression_trees.ipynb) | Not yet released |
 
 Solutions are separate files, so an update will not replace the notebook in
 which you have been working.
