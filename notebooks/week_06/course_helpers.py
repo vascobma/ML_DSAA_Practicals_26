@@ -249,8 +249,75 @@ class Scoreboard:
 # task, MAE for the other.
 
 
+def _log_html(log, label):
+    """Render scores first, moving shared evaluation context into the caption."""
+    from html import escape
+
+    context = [("frame", "CV"), ("rows", "Training rows"), ("folds", "Folds"),
+               (f"validation {label} is", "Estimate")]
+    columns = [("model", "Model")]
+    caption = []
+    for key, title in context:
+        value = log[0][key]
+        if all(row[key] == value for row in log):
+            value = f"{value:,}" if isinstance(value, int) else str(value)
+            caption.append(f"{title}: {escape(value)}")
+        else:
+            columns.append((key, title))
+    columns += [(f"{part} {label}", f"{part.title()} {label}")
+                for part in ("train", "validation", "test")]
+    columns.append(("gap", "Validation − test"))
+    places = 2 if label == "MAE" else 4
+    header = "".join(f'<th scope="col">{escape(title)}</th>' for _, title in columns)
+    body = []
+    for row in log:
+        cells = []
+        for key, _ in columns:
+            value = (row[f"validation {label}"] - row[f"test {label}"]
+                     if key == "gap" else row[key])
+            if key == "model":
+                cells.append(f'<th scope="row"><code>{escape(str(value))}</code></th>')
+            else:
+                numeric = isinstance(value, (int, float))
+                text = (f"{value:+,.{places}f}" if key == "gap"
+                        else f"{value:,.{places}f}" if isinstance(value, float)
+                        else f"{value:,}" if isinstance(value, int) else str(value))
+                kind = "number" if numeric else "context"
+                cells.append(f'<td class="{kind}">{escape(text)}</td>')
+        body.append("<tr>" + "".join(cells) + "</tr>")
+    return (
+        '<div class="course-result-log">'
+        '<style>'
+        '.course-result-log{overflow-x:auto;margin:1em 0;color:inherit}'
+        '.course-result-log table{border-collapse:collapse;width:100%;font-size:0.95em}'
+        '.course-result-log caption{text-align:left;padding:0 0 0.8em;color:inherit}'
+        '.course-result-log th,.course-result-log td{padding:0.65em 0.8em;'
+        'border-bottom:1px solid var(--jp-border-color2,#d8d8d8)}'
+        '.course-result-log thead th{text-align:right;white-space:nowrap;font-weight:600;'
+        'border-bottom:2px solid var(--jp-border-color1,#aaa)}'
+        '.course-result-log thead th:first-child,.course-result-log tbody th{text-align:left}'
+        '.course-result-log tbody th{font-weight:400;max-width:34ch;overflow-wrap:anywhere}'
+        '.course-result-log code{white-space:normal;background:transparent;color:inherit}'
+        '.course-result-log .number{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}'
+        '.course-result-log .context{text-align:left}'
+        '.course-result-log tbody tr:nth-child(even){background:var(--jp-layout-color1,#f6f7f8)}'
+        '</style><table><caption>' + ' · '.join(caption) + '</caption><thead><tr>'
+        + header + '</tr></thead><tbody>' + ''.join(body) + '</tbody></table></div>'
+    )
+
+
 def show_log(log, label="F1"):
-    """Print every row of a log, and how far each estimate landed from its test score."""
+    """Display an aligned notebook table, or print the full log in a terminal."""
+    try:
+        from IPython import get_ipython
+        from IPython.display import HTML, display
+    except ImportError:
+        shell = None
+    else:
+        shell = get_ipython()
+    if getattr(shell, "kernel", None) is not None:
+        display(HTML(_log_html(log, label)))
+        return
     rows = []
     for entry in log:
         row = {key: value for key, value in entry.items() if key != "model"}

@@ -12,6 +12,7 @@ import json
 import operator
 from functools import partial
 from pathlib import Path
+from tqdm.auto import tqdm
 
 import numpy as np
 import pandas as pd
@@ -563,9 +564,11 @@ def prepared_folds(preprocessor, folds, X, y, *, n_jobs=None):
     `preprocessor` is fitted on each fold's fit rows alone.
     """
     splits = folds.split(X, y) if hasattr(folds, "split") else folds
-    return Parallel(n_jobs=n_jobs)(
+    completed = Parallel(n_jobs=n_jobs, return_as="generator")(
         delayed(_prepare_fold)(preprocessor, X, y, fit_at, score_at)
         for fit_at, score_at in splits)
+    return list(tqdm(completed, total=folds.get_n_splits(X, y) if hasattr(folds, "get_n_splits") else None,
+                     desc="Prepare training folds", unit="fold", leave=False))
 
 
 def _fold_scores(preprocessor, estimators, scorer, X, y, fit_at, score_at):
@@ -620,9 +623,10 @@ class CachedSearchCV(BaseEstimator):
             with TemporaryDirectory(prefix="prepared-search-") as cache_dir:
                 memory = Memory(cache_dir, verbose=0)
                 cached_models = [clone(model).set_params(memory=memory) for model in models]
-                results = Parallel(n_jobs=self.n_jobs)(
+                completed = Parallel(n_jobs=self.n_jobs, return_as="generator")(
                     delayed(_candidate_scores)(cached_models, scorer, X, y, *fold)
                     for fold in folds)
+                results = list(tqdm(completed, total=len(folds), desc="Search folds", unit="fold", leave=False))
                 scores = np.asarray(results).T
         else:
             shared = {}  # one preprocessor per distinct setting, with its candidates
@@ -631,10 +635,11 @@ class CachedSearchCV(BaseEstimator):
                 shared.setdefault(key, (model.preprocessor, []))[1].append(index)
             tasks = [(preprocessor, indices, fold)
                      for preprocessor, indices in shared.values() for fold in range(len(folds))]
-            results = Parallel(n_jobs=self.n_jobs)(
+            completed = Parallel(n_jobs=self.n_jobs, return_as="generator")(
                 delayed(_fold_scores)(preprocessor, [models[i].estimator for i in indices],
                                       scorer, X, y, *folds[fold])
                 for preprocessor, indices, fold in tasks)
+            results = list(tqdm(completed, total=len(tasks), desc="Search folds", unit="fold", leave=False))
             scores = np.empty((len(params), len(folds)))
             for (_, indices, fold), fold_scores in zip(tasks, results):
                 scores[indices, fold] = fold_scores

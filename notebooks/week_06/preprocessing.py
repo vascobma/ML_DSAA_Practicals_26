@@ -12,6 +12,7 @@ import json
 import operator
 from functools import partial
 from pathlib import Path
+from tqdm.auto import tqdm
 
 import numpy as np
 import pandas as pd
@@ -433,7 +434,10 @@ def _selector_class(name, scores):
 # Fitting a recipe and a model together, and searching over candidates
 # -------------------------------------------------------------------------
 
+from tempfile import TemporaryDirectory
+from joblib import Memory
 from sklearn.base import is_classifier
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import get_scorer
 from sklearn.model_selection import (
     ParameterGrid, RepeatedKFold, RepeatedStratifiedKFold, check_cv)
@@ -470,18 +474,30 @@ def outer_folds(splitter, X, y):
             for _, score_at in splitter.split(X, y)]
 
 
-class PreparedEstimator(BaseEstimator):
-    """Fit a preprocessor and an estimator on the same rows, and predict through both.
+def _fit_preprocessor(preprocessor, X, y):
+    """Fit one cloned preprocessor; cache keys include the rows, labels and recipe."""
+    fitted = clone(preprocessor)
+    return fitted, fitted.fit_transform(X, y)
 
-    The pair takes the estimator's type, so scikit-learn scores and splits it as
-    the estimator, and offers `predict_proba` and `decision_function` only when
-    the estimator does.
+
+def _transform_preprocessor(preprocessor, X):
+    """Transform rows with one fitted recipe; its fitted state is part of the cache key."""
+    return preprocessor.transform(X)
+
+
+class PreparedEstimator(BaseEstimator):
+    """Fit preprocessing and a model, optionally calibrating their complete fit.
+
+    Calibration splits raw rows before fitting either part. A search may supply
+    a Memory cache to reuse preprocessing only for identical training inputs.
     """
 
-    def __init__(self, preprocessor, estimator):
-        """Store both parts, unfitted."""
+    def __init__(self, preprocessor, estimator, *, calibration=None, memory=None):
+        """Store the unfitted parts, optional calibration method and fit cache."""
         self.preprocessor = preprocessor
         self.estimator = estimator
+        self.calibration = calibration
+        self.memory = memory
 
     def __sklearn_tags__(self):
         """The estimator's type and target tags."""
@@ -494,27 +510,43 @@ class PreparedEstimator(BaseEstimator):
         return tags
 
     def fit(self, X, y):
-        """Fit the preprocessor on these rows, then the estimator on its output."""
-        self.preprocessor_ = clone(self.preprocessor)
-        self.estimator_ = clone(self.estimator).fit(
-            self.preprocessor_.fit_transform(X, y), y)
+        """Fit on raw rows, keeping calibration validation rows out of preprocessing."""
+        if self.calibration is not None:
+            base = clone(self).set_params(calibration=None)
+            self.estimator_ = CalibratedClassifierCV(
+                base, method=self.calibration).fit(X, y)
+        else:
+            fit_preprocessor = (_fit_preprocessor if self.memory is None
+                                else self.memory.cache(_fit_preprocessor))
+            self.preprocessor_, ready = fit_preprocessor(self.preprocessor, X, y)
+            self.estimator_ = clone(self.estimator).fit(ready, y)
         if hasattr(self.estimator_, "classes_"):
             self.classes_ = self.estimator_.classes_
         return self
 
+    def _model_input(self, X):
+        """Pass raw rows to calibration and prepared rows to an ordinary model."""
+        if self.calibration is not None:
+            return X
+        transform = (_transform_preprocessor if self.memory is None
+                     else self.memory.cache(_transform_preprocessor))
+        return transform(self.preprocessor_, X)
+
     def predict(self, X):
-        """Transform with the fitted preprocessor, then predict."""
-        return self.estimator_.predict(self.preprocessor_.transform(X))
+        """Predict through the fitted preprocessing and model."""
+        return self.estimator_.predict(self._model_input(X))
 
-    @available_if(lambda self: hasattr(self.estimator, "predict_proba"))
+    @available_if(lambda self: self.calibration is not None
+                  or hasattr(self.estimator, "predict_proba"))
     def predict_proba(self, X):
-        """Class probabilities through both fitted parts."""
-        return self.estimator_.predict_proba(self.preprocessor_.transform(X))
+        """Class probabilities through the complete fitted estimator."""
+        return self.estimator_.predict_proba(self._model_input(X))
 
-    @available_if(lambda self: hasattr(self.estimator, "decision_function"))
+    @available_if(lambda self: self.calibration is None
+                  and hasattr(self.estimator, "decision_function"))
     def decision_function(self, X):
-        """Decision scores through both fitted parts."""
-        return self.estimator_.decision_function(self.preprocessor_.transform(X))
+        """Decision scores when the uncalibrated estimator supports them."""
+        return self.estimator_.decision_function(self._model_input(X))
 
 
 def _prepare_fold(preprocessor, X, y, fit_at, score_at):
@@ -532,9 +564,11 @@ def prepared_folds(preprocessor, folds, X, y, *, n_jobs=None):
     `preprocessor` is fitted on each fold's fit rows alone.
     """
     splits = folds.split(X, y) if hasattr(folds, "split") else folds
-    return Parallel(n_jobs=n_jobs)(
+    completed = Parallel(n_jobs=n_jobs, return_as="generator")(
         delayed(_prepare_fold)(preprocessor, X, y, fit_at, score_at)
         for fit_at, score_at in splits)
+    return list(tqdm(completed, total=folds.get_n_splits(X, y) if hasattr(folds, "get_n_splits") else None,
+                     desc="Prepare training folds", unit="fold", leave=False))
 
 
 def _fold_scores(preprocessor, estimators, scorer, X, y, fit_at, score_at):
@@ -545,10 +579,18 @@ def _fold_scores(preprocessor, estimators, scorer, X, y, fit_at, score_at):
             for estimator in estimators]
 
 
+def _candidate_scores(models, scorer, X, y, fit_at, score_at):
+    """Fit complete candidates on raw fold rows, sharing only their safe fit cache."""
+    return [scorer(clone(model).fit(X.iloc[fit_at], y.iloc[fit_at]),
+                   X.iloc[score_at], y.iloc[score_at]) for model in models]
+
+
 class CachedSearchCV(BaseEstimator):
     """A grid search over a PreparedEstimator that fits each distinct preprocessor once per fold.
 
-    Each fold's matrices are prepared once for all the candidates that share a
+    Ordinary candidates share each fold's prepared matrices. Calibrated candidates
+    cache preprocessing within their own internal training splits instead.
+    Each distinct fit is reused only by candidates with the same
     preprocessor, and the folds run in parallel on `n_jobs` workers. Every
     candidate gets its own copy of each parameter value. `cv_results_` holds
     'params', 'mean_test_score', 'std_test_score' and one 'param_<name>' column
@@ -575,20 +617,32 @@ class CachedSearchCV(BaseEstimator):
         params = list(ParameterGrid(self.param_grid))
         models = [clone(self.estimator).set_params(**clone(candidate, safe=False))
                   for candidate in params]
-        shared = {}  # one preprocessor per distinct setting, with its candidates
-        for index, model in enumerate(models):
-            key = repr(model.preprocessor.get_params())
-            shared.setdefault(key, (model.preprocessor, []))[1].append(index)
-        tasks = [(preprocessor, indices, fold)
-                 for preprocessor, indices in shared.values() for fold in range(len(folds))]
-        results = Parallel(n_jobs=self.n_jobs)(
-            delayed(_fold_scores)(preprocessor, [models[i].estimator for i in indices],
-                                  scorer, X, y, *folds[fold])
-            for preprocessor, indices, fold in tasks)
-        scores = np.empty((len(params), len(folds)))
-        for (_, indices, fold), fold_scores in zip(tasks, results):
-            scores[indices, fold] = fold_scores
-
+        if any(model.calibration is not None for model in models):
+            # The internal calibration folds must fit their own preprocessing.
+            # Memory keys include X and y, so only identical training splits share.
+            with TemporaryDirectory(prefix="prepared-search-") as cache_dir:
+                memory = Memory(cache_dir, verbose=0)
+                cached_models = [clone(model).set_params(memory=memory) for model in models]
+                completed = Parallel(n_jobs=self.n_jobs, return_as="generator")(
+                    delayed(_candidate_scores)(cached_models, scorer, X, y, *fold)
+                    for fold in folds)
+                results = list(tqdm(completed, total=len(folds), desc="Search folds", unit="fold", leave=False))
+                scores = np.asarray(results).T
+        else:
+            shared = {}  # one preprocessor per distinct setting, with its candidates
+            for index, model in enumerate(models):
+                key = repr(model.preprocessor.get_params())
+                shared.setdefault(key, (model.preprocessor, []))[1].append(index)
+            tasks = [(preprocessor, indices, fold)
+                     for preprocessor, indices in shared.values() for fold in range(len(folds))]
+            completed = Parallel(n_jobs=self.n_jobs, return_as="generator")(
+                delayed(_fold_scores)(preprocessor, [models[i].estimator for i in indices],
+                                      scorer, X, y, *folds[fold])
+                for preprocessor, indices, fold in tasks)
+            results = list(tqdm(completed, total=len(tasks), desc="Search folds", unit="fold", leave=False))
+            scores = np.empty((len(params), len(folds)))
+            for (_, indices, fold), fold_scores in zip(tasks, results):
+                scores[indices, fold] = fold_scores
         self.cv_results_ = {"params": params,
                             "mean_test_score": scores.mean(axis=1),
                             "std_test_score": scores.std(axis=1)}
