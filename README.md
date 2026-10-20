@@ -17,7 +17,7 @@ corresponding practical class.
 | Week 4 | Feature work on a regression target | [Open](notebooks/week_04/week_04_feature_work_regression.ipynb) | [Open](solutions/week_04/week_04_feature_work_regression_solution.ipynb) |
 | Week 5 | Performance measures | [Open](notebooks/week_05/week_05_performance_measures.ipynb) | [Open](solutions/week_05/week_05_performance_measures_solution.ipynb) |
 | Week 5 | Model selection | [Open](notebooks/week_05/week_05_model_selection.ipynb) | [Open](solutions/week_05/week_05_model_selection_solution.ipynb) |
-| Week 6 | Linear and logistic models | [Open](notebooks/week_06/week_06_linear_logistic.ipynb) | Not yet released |
+| Week 6 | Linear and logistic models | [Open](notebooks/week_06/week_06_linear_logistic.ipynb) | [Open](solutions/week_06/week_06_linear_logistic_solution.ipynb) |
 | Week 7 | Probability and Naive Bayes | [Open](notebooks/week_07/week_07_naive_bayes.ipynb) | Not yet released |
 | Week 7 | Bayesian regression | [Open](notebooks/week_07/week_07_bayesian_regression.ipynb) | Not yet released |
 | Week 8 | Similarity and KNN | [Open](notebooks/week_08/week_08_similarity_knn.ipynb) | Not yet released |
